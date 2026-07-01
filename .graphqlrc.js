@@ -1,9 +1,9 @@
 require('dotenv').config({ path: `${__dirname}/.env` });
 
-const accessToken = process.env.ACCESS_TOKEN;
+const accessToken = process.env.GITHUB_TOKEN;
 
 module.exports = {
-  schema: 'github-schema.graphql',
+  schema: 'schema.graphql',
   documents: ['./**/*.ts'],
   extensions: {
     endpoints: {

@@ -1,0 +1,123 @@
+import { graphql } from '../../../../graphql/generated/index.js';
+import type { ValidConfigOptions } from '../../../../options/options.js';
+import { BackportError } from '../../../backport-error.js';
+import { isMissingConfigFileException } from '../../../remote-config.js';
+import type { Commit } from '../../../sourceCommit/parse-source-commit.js';
+import { graphqlRequest } from '../client/graphql-client.js';
+import { fetchCommitBySha } from './fetch-commit-by-sha.js';
+import { fetchCommitsForRebaseAndMergeStrategy } from './fetch-commits-for-rebase-and-merge-strategy.js';
+
+export async function fetchCommitsByPullNumber(options: {
+  githubToken: string;
+  branchLabelMapping?: ValidConfigOptions['branchLabelMapping'];
+  githubApiBaseUrlV4?: string;
+  pullNumber: number;
+  repoName: string;
+  repoOwner: string;
+  sourceBranch: string;
+}): Promise<Commit[]> {
+  const {
+    githubToken,
+    githubApiBaseUrlV4 = 'https://api.github.com/graphql',
+    pullNumber,
+    repoName,
+    repoOwner,
+  } = options;
+
+  const query = graphql(`
+    query CommitByPullNumber(
+      $repoOwner: String!
+      $repoName: String!
+      $pr: Int!
+    ) {
+      repository(owner: $repoOwner, name: $repoName) {
+        pullRequest(number: $pr) {
+          # used to determine if "Rebase and Merge" strategy was used
+          commits(last: 1) {
+            totalCount
+            edges {
+              node {
+                commit {
+                  message
+                }
+              }
+            }
+          }
+
+          mergeCommit {
+            oid
+
+            # used to determine if "Rebase and Merge" strategy was used
+            committedDate
+            history(first: 2) {
+              edges {
+                node {
+                  message
+                  committedDate
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `);
+
+  const variables = { repoOwner, repoName, pr: pullNumber };
+  const result = await graphqlRequest(
+    { githubToken, githubApiBaseUrlV4 },
+    query,
+    variables,
+  );
+
+  if (result.error && !isMissingConfigFileException(result)) {
+    throw new BackportError({
+      code: 'github-api-exception',
+      message: result.error.message,
+    });
+  }
+
+  const { data } = result;
+
+  const pullRequestNode = data?.repository?.pullRequest;
+  if (!pullRequestNode) {
+    throw new BackportError({
+      code: 'pr-not-found-exception',
+      pullNumber,
+    });
+  }
+
+  const { mergeCommit } = pullRequestNode;
+  if (mergeCommit === null) {
+    throw new BackportError({
+      code: 'pr-not-merged-exception',
+      pullNumber,
+    });
+  }
+
+  const lastCommitInPullRequest =
+    pullRequestNode.commits.edges?.at(0)?.node?.commit;
+  const firstCommitInBaseBranch = mergeCommit?.history.edges?.at(0)?.node;
+  const isRebaseAndMergeStrategy =
+    pullRequestNode.commits.totalCount > 0 &&
+    mergeCommit?.history.edges?.every(
+      (c) => c?.node?.committedDate === mergeCommit.committedDate,
+    ) &&
+    lastCommitInPullRequest?.message === firstCommitInBaseBranch?.message;
+
+  if (isRebaseAndMergeStrategy) {
+    const commits = await fetchCommitsForRebaseAndMergeStrategy(
+      options,
+      pullRequestNode.commits.totalCount,
+    );
+    if (commits) {
+      return commits;
+    }
+  }
+
+  const commit = await fetchCommitBySha({
+    ...options,
+    sha: String(mergeCommit.oid),
+  });
+  return [commit];
+}

@@ -1,0 +1,159 @@
+import fs from 'node:fs/promises';
+import { findUp } from 'find-up';
+import type { SpyHelper } from '../../types/spy-helper.js';
+import { getProjectConfig } from './project-config.js';
+
+describe('getProjectConfig', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  describe('deprecations', () => {
+    describe('when specifying deprecated `branches`', () => {
+      it('is returned as `targetBranchChoices`', async () => {
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+          JSON.stringify({
+            repoName: 'kibana',
+            repoOwner: 'elastic',
+            branches: ['6.x'],
+          }),
+        );
+
+        const projectConfig = await getProjectConfig({
+          projectConfigFile: undefined,
+          cwd: undefined,
+        });
+        expect(projectConfig?.targetBranchChoices).toEqual(['6.x']);
+      });
+    });
+
+    describe('when specifying deprecated `labels`', () => {
+      it('is returned as `targetPRLabels`', async () => {
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+          JSON.stringify({
+            labels: ['backport'],
+          }),
+        );
+
+        const projectConfig = await getProjectConfig({
+          projectConfigFile: undefined,
+          cwd: undefined,
+        });
+        expect(projectConfig?.targetPRLabels).toEqual(['backport']);
+      });
+    });
+
+    describe('when specifying deprecated `upstream`', () => {
+      it('is split into `repoOwner` and `repoName`', async () => {
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+          JSON.stringify({
+            upstream: 'elastic/kibana',
+          }),
+        );
+
+        const projectConfig = await getProjectConfig({
+          projectConfigFile: undefined,
+          cwd: undefined,
+        });
+        expect(projectConfig?.repoOwner).toEqual('elastic');
+        expect(projectConfig?.repoName).toEqual('kibana');
+      });
+    });
+
+    describe('when projectConfig is valid', () => {
+      let projectConfig: Awaited<ReturnType<typeof getProjectConfig>>;
+      beforeEach(async () => {
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+          JSON.stringify({
+            repoName: 'kibana',
+            repoOwner: 'elastic',
+            targetBranchChoices: ['6.x'],
+            targetPRLabels: ['backport'],
+          }),
+        );
+
+        projectConfig = await getProjectConfig({
+          projectConfigFile: undefined,
+          cwd: '/my/cwd',
+        });
+      });
+
+      it('should call findUp', () => {
+        expect(findUp).toHaveBeenCalledWith('.backportrc.json', {
+          cwd: '/my/cwd',
+        });
+      });
+
+      it('should return config', () => {
+        expect(projectConfig).toEqual({
+          repoName: 'kibana',
+          repoOwner: 'elastic',
+          targetBranchChoices: ['6.x'],
+          targetPRLabels: ['backport'],
+        });
+      });
+    });
+
+    describe('when specifying a path to project config', () => {
+      let projectConfig: Awaited<ReturnType<typeof getProjectConfig>>;
+      let spy: SpyHelper<typeof fs.readFile>;
+
+      beforeEach(async () => {
+        spy = vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+          JSON.stringify({
+            repoName: 'kibana',
+            repoOwner: 'elastic',
+            targetBranchChoices: ['6.x'],
+            targetPRLabels: ['backport'],
+          }),
+        );
+
+        projectConfig = await getProjectConfig({
+          projectConfigFile: '/custom/path/to/project/.backportrc.json',
+          cwd: undefined,
+        });
+      });
+
+      it('should not call findUp', () => {
+        expect(findUp).not.toHaveBeenCalled();
+      });
+
+      it('should retrieve config via custom config path', () => {
+        expect(spy).toHaveBeenCalledWith(
+          '/custom/path/to/project/.backportrc.json',
+          'utf8',
+        );
+      });
+
+      it('should return config', () => {
+        expect(projectConfig).toEqual({
+          repoName: 'kibana',
+          repoOwner: 'elastic',
+          targetBranchChoices: ['6.x'],
+          targetPRLabels: ['backport'],
+        });
+      });
+    });
+  });
+
+  describe('when projectConfig is empty', () => {
+    it('should return empty config', async () => {
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce('{}');
+      const projectConfig = await getProjectConfig({
+        projectConfigFile: undefined,
+        cwd: undefined,
+      });
+      expect(projectConfig).toEqual({});
+    });
+  });
+
+  describe('when projectConfig is missing', () => {
+    it('should return empty config', async () => {
+      // @ts-expect-error
+      findUp.mockReturnValueOnce();
+      const projectConfig = await getProjectConfig({
+        projectConfigFile: undefined,
+        cwd: undefined,
+      });
+      expect(projectConfig).toEqual(undefined);
+    });
+  });
+});

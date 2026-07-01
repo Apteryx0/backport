@@ -1,0 +1,586 @@
+/**
+ * Defines all CLI options via yargs.
+ *
+ * Exports:
+ * - `getOptionsFromCliArgs()` — full parse + transform of process.argv
+ * - `getRuntimeArguments()` — lightweight pre-parse for logger setup (interactive, logFilePath, ls)
+ */
+import yargs from 'yargs';
+import yargsParser from 'yargs-parser';
+import { excludeUndefined } from '../utils/exclude-undefined.js';
+import { getPackageVersion } from '../utils/package-version.js';
+import type { ConfigFileOptions } from './config-options.js';
+import { defaultConfigOptions } from './option-schema.js';
+
+// ── Return type ─────────────────────────────────────────────────────
+export type OptionsFromCliArgs = ReturnType<typeof getOptionsFromCliArgs>;
+
+// ── Main entry point ────────────────────────────────────────────────
+export function getOptionsFromCliArgs(processArgs: readonly string[]) {
+  const rawArgs = parseYargsOptions(processArgs);
+  return transformCliArgs(rawArgs);
+}
+
+// ── Lightweight pre-parse (used before full parse for logger setup) ─
+export function getRuntimeArguments(
+  processArgs: string[],
+  optionsFromModule?: ConfigFileOptions,
+) {
+  const { nonInteractive, json, logFilePath, ls } = yargsParser(processArgs);
+  const base = { ...defaultConfigOptions, ...optionsFromModule };
+
+  return {
+    interactive:
+      nonInteractive === undefined && json === undefined
+        ? base.interactive
+        : !(nonInteractive === true || json === true),
+    logFilePath,
+    ls,
+  };
+}
+
+// ── Yargs definition ────────────────────────────────────────────────
+/**
+ * Defines all CLI options and returns the raw parsed result from yargs.
+ * No renaming or transformation happens here — that's done in `transformCliArgs`.
+ */
+function parseYargsOptions(processArgs: readonly string[]) {
+  const y = yargs(processArgs);
+  const yargsInstance = y
+    .strict()
+    .parserConfiguration({
+      'strip-dashed': true,
+      'strip-aliased': true,
+      'boolean-negation': false,
+    })
+    .usage('$0 [args]')
+    .wrap(Math.max(100, Math.min(120, y.terminalWidth())))
+
+    // ── GitHub & Authentication ──────────────────────────────────────
+    .option('githubToken', {
+      alias: ['token', 'accessToken', 'accesstoken'],
+      description: 'GitHub token',
+      type: 'string',
+    })
+
+    // ── Source Commit Selection ──────────────────────────────────────
+    .option('all', {
+      description: 'List all commits',
+      alias: 'a',
+      type: 'boolean',
+      conflicts: 'author',
+    })
+
+    // ── Target PR Creation ──────────────────────────────────────────
+    .option('assignee', {
+      description: 'Add assignees to the target pull request',
+      alias: 'assign',
+      type: 'array',
+      string: true,
+      conflicts: ['autoAssign'],
+    })
+
+    .option('autoAssign', {
+      description: 'Auto assign the target pull request to yourself',
+      type: 'boolean',
+      conflicts: ['assignees'],
+    })
+
+    .option('autoMerge', {
+      description: 'Enable auto-merge for created pull requests',
+      type: 'boolean',
+    })
+
+    .option('autoMergeMethod', {
+      description:
+        'Sets auto-merge method when using --auto-merge. Default: merge',
+      type: 'string',
+      choices: ['merge', 'rebase', 'squash'],
+    })
+
+    .option('author', {
+      description: 'Show commits by a specific user',
+      type: 'string',
+      conflicts: 'all',
+    })
+
+    // ── Cherry-pick & Conflict Handling ─────────────────────────────
+    .option('cherryPickRef', {
+      description: 'Append commit message with "(cherry picked from commit...)',
+      type: 'boolean',
+      conflicts: ['noCherryPickRef'],
+    })
+
+    .option('conflictResolution', {
+      description: 'Conflict resolution strategy. Defaults to "abort"',
+      type: 'string',
+      choices: ['abort', 'commit', 'theirs'],
+    })
+
+    // ── Paths & Config ─────────────────────────────────────────────
+    .option('cwd', {
+      hidden: true,
+      description: 'Path to source repo',
+      type: 'string',
+    })
+
+    .option('projectConfigFile', {
+      alias: 'config',
+      description: 'Path to project config',
+      type: 'string',
+    })
+
+    .option('globalConfigFile', {
+      description: 'Path to global config',
+      type: 'string',
+    })
+
+    .option('since', {
+      description: 'ISO-8601 date for filtering commits',
+      type: 'string',
+      coerce: (since) => {
+        if (since) {
+          return new Date(since).toISOString();
+        }
+      },
+    })
+
+    .option('until', {
+      description: 'ISO-8601 date for filtering commits',
+      type: 'string',
+      coerce: (until) => {
+        if (until) {
+          return new Date(until).toISOString();
+        }
+      },
+    })
+
+    .option('workdir', {
+      description: 'Path to temporary backport repo',
+      alias: 'dir',
+      type: 'string',
+    })
+
+    .option('verbose', {
+      description: 'Show details about each commit',
+      alias: 'details',
+      type: 'boolean',
+    })
+
+    .option('draft', {
+      description: 'Publish pull request as draft',
+      type: 'boolean',
+    })
+
+    .option('dryRun', {
+      description: 'Run backport locally without pushing to Github',
+      type: 'boolean',
+    })
+
+    .option('editor', {
+      description: 'Editor to be opened during conflict resolution',
+      type: 'string',
+    })
+
+    .option('skipRemoteConfig', {
+      description:
+        'Use local .backportrc.json config instead of loading from Github',
+      type: 'boolean',
+    })
+
+    // push target branch to {repoForkOwner}/{repoName}
+    .option('fork', {
+      description: 'Create backports in fork or origin repo. Defaults to true',
+      type: 'boolean',
+      conflicts: ['noFork'],
+    })
+
+    .option('gitHostname', {
+      hidden: true,
+      description: 'Hostname for Github',
+      type: 'string',
+    })
+
+    .option('githubApiBaseUrlV3', {
+      hidden: true,
+      description: `Base url for Github's REST (v3) API`,
+      type: 'string',
+    })
+
+    .option('githubApiBaseUrlV4', {
+      hidden: true,
+      description: `Base url for Github's GraphQL (v4) API`,
+      type: 'string',
+    })
+
+    .option('gitAuthorName', {
+      description: `Set commit author name`,
+      type: 'string',
+    })
+
+    .option('gitAuthorEmail', {
+      description: `Set commit author email`,
+      type: 'string',
+    })
+
+    // ── Output & Mode ──────────────────────────────────────────────
+    .option('nonInteractive', {
+      alias: ['json'],
+      description: 'Disable interactive prompts and return response as JSON',
+      type: 'boolean',
+      conflicts: 'interactive',
+    })
+
+    .option('logFilePath', {
+      hidden: true,
+      description: `Path to log file`,
+      type: 'string',
+    })
+
+    .option('ls', {
+      description: 'List commits instead of backporting them',
+      type: 'boolean',
+    })
+
+    .option('mainline', {
+      description:
+        'Parent id of merge commit. Defaults to 1 when supplied without arguments',
+      type: 'number',
+      coerce: (mainline) => {
+        if (mainline === undefined) {
+          // return 1 if `--mainline` is given without a value
+          // return undefined if --mainline is not supplied at all
+          return processArgs.includes('--mainline') ? 1 : undefined;
+        }
+
+        // use specified mainline parent
+        if (Number.isInteger(mainline)) {
+          return mainline as number;
+        }
+
+        // Invalid value provided
+        throw new Error(`--mainline must be an integer. Received: ${mainline}`);
+      },
+    })
+
+    .option('signoff', {
+      description: 'Pass the --signoff option to the cherry-pick command',
+      type: 'boolean',
+      alias: ['s'],
+    })
+
+    // limit number of commits to choose from
+    .option('maxCount', {
+      description: 'Number of commits to choose from',
+      alias: ['n', 'number'],
+      type: 'number',
+    })
+
+    // cli-only
+    .option('multiple', {
+      description: 'Select multiple branches/commits',
+      type: 'boolean',
+      conflicts: ['multipleBranches', 'multipleCommits'],
+    })
+
+    // allow picking multiple target branches
+    .option('multipleBranches', {
+      description: 'Backport to multiple branches',
+      type: 'boolean',
+      conflicts: ['multiple'],
+    })
+
+    // allow picking multiple commits
+    .option('multipleCommits', {
+      description: 'Backport multiple commits',
+      type: 'boolean',
+      conflicts: ['multiple'],
+    })
+
+    .option('noCherryPickRef', {
+      description:
+        'Do not append commit message with "(cherry picked from commit...)"',
+      type: 'boolean',
+      conflicts: ['cherryPickRef'],
+    })
+
+    // cli-only
+    // negation of `publishStatusCommentOnSuccess` and `publishStatusCommentOnFailure`
+    .option('noStatusComment', {
+      description: "Don't publish status comment to Github",
+      type: 'boolean',
+    })
+
+    .option('noVerify', {
+      description: 'Bypass the pre-commit and commit-msg hooks',
+      type: 'boolean',
+    })
+
+    .option('noFork', {
+      description: 'Create backports in the origin repo',
+      type: 'boolean',
+      conflicts: ['fork', 'repoForkOwner'],
+    })
+
+    .option('onlyMissing', {
+      description: 'Only list commits with missing or unmerged backports',
+      type: 'boolean',
+    })
+
+    .option('path', {
+      description: 'Only list commits touching files under the specified path',
+      alias: 'p',
+      type: 'array',
+      string: true,
+    })
+
+    .option('prDescription', {
+      description: 'Description to be added to pull request',
+      alias: 'description',
+      type: 'string',
+    })
+
+    .option('prTitle', {
+      description: 'Title of pull request',
+      alias: 'title',
+      type: 'string',
+    })
+
+    .option('prQuery', {
+      conflicts: ['pullNumber', 'sha', 'path'],
+      description: `Filter source pull requests by a query`,
+      alias: ['q'],
+      type: 'string',
+    })
+
+    .option('pullNumber', {
+      conflicts: ['sha', 'prQuery'],
+      description: 'Pull request to backport',
+      alias: ['pr'],
+      type: 'number',
+    })
+
+    .option('resetAuthor', {
+      description: 'Set yourself as commit author',
+      type: 'boolean',
+    })
+
+    .option('reviewer', {
+      description: 'Add reviewer to the target PR',
+      type: 'array',
+      string: true,
+    })
+
+    .option('repoForkOwner', {
+      description:
+        'The owner of the fork where the backport branch is pushed. Defaults to the currently authenticated user',
+      type: 'string',
+      conflicts: ['noFork'],
+    })
+
+    .option('repoOwner', {
+      hidden: true,
+      description: 'Repository owner',
+      type: 'string',
+      conflicts: ['repo'],
+    })
+
+    .option('repoName', {
+      hidden: true,
+      description: 'Repository name',
+      type: 'string',
+      conflicts: ['repo'],
+    })
+
+    .option('repo', {
+      description: 'Repo owner and name',
+      alias: 'upstream',
+      type: 'string',
+      conflicts: ['repoName', 'repoOwner'],
+    })
+
+    .option('sha', {
+      conflicts: ['pullNumber', 'prQuery'],
+      description: 'Commit sha to backport',
+      alias: 'commit',
+      type: 'string',
+    })
+
+    .option('noUnmergedBackportsHelp', {
+      description: 'Do not list the unmerged backports in PR comment',
+      type: 'boolean',
+    })
+
+    // ── Branch Selection ────────────────────────────────────────────
+    .option('sourceBranch', {
+      description: `Specify a non-default branch (normally "master") to backport from`,
+      type: 'string',
+    })
+
+    .option('sourcePRLabel', {
+      description: 'Add labels to the source (original) PR',
+      alias: 'sourcePrLabel',
+      type: 'array',
+      string: true,
+    })
+
+    .option('copySourcePRLabels', {
+      description: 'Copy labels from source PR to the target PR',
+      alias: 'copySourcePrLabels',
+      type: 'boolean',
+    })
+
+    .option('copySourcePRReviewers', {
+      description: 'Copy reviewers from the source PR to the target PR',
+      alias: ['copySourcePrReviewers', 'addOriginalReviewers'],
+      type: 'boolean',
+    })
+
+    .option('targetBranch', {
+      description: 'Branch(es) to backport to',
+      alias: ['branch', 'b'],
+      type: 'array',
+      string: true, // ensure `6.0` is not coerced to `6`
+    })
+
+    .option('targetBranchChoice', {
+      description: 'List branches to backport to',
+      type: 'array',
+      string: true,
+    })
+
+    .option('targetPRLabel', {
+      description: 'Add labels to the target (backport) PR',
+      alias: ['label', 'l'],
+      type: 'array',
+      string: true,
+    })
+
+    .option('backportBranchName', {
+      description: 'Name template to use for the branch name of the backport',
+      type: 'string',
+    })
+
+    // cli-only
+    .option('verify', {
+      description: `Opposite of no-verify`,
+      type: 'boolean',
+    })
+
+    .version(getPackageVersion())
+    .alias('version', 'v')
+    .help()
+    .exitProcess(!processArgs.includes('--noExitProcess'))
+
+    .epilogue(
+      'For bugs, feature requests or questions: https://github.com/sorenlouv/backport/issues\nOr contact me directly: https://twitter.com/sorenlouv',
+    )
+    // don't kill process upon error
+    // and don't log error to console
+    .fail((msg, err) => {
+      if (err) {
+        throw err;
+      }
+
+      throw new Error(msg);
+    });
+
+  return yargsInstance.parseSync();
+}
+
+// ── CLI transform ───────────────────────────────────────────────────
+/**
+ * Transforms raw yargs output into the canonical option shape:
+ * - Resolves negation flags (--no-fork → fork: false)
+ * - Renames singular → plural arrays (assignee → assignees)
+ * - Resolves shorthands (--repo owner/name → repoOwner + repoName)
+ * - Resolves --all → author: null
+ * - Resolves --multiple → multipleBranches + multipleCommits
+ * - Resolves --editor false → editor: undefined
+ * - Strips yargs internal fields ($0, _)
+ */
+function transformCliArgs(rawArgs: ReturnType<typeof parseYargsOptions>) {
+  const {
+    /* eslint-disable @typescript-eslint/no-unused-vars */
+    $0,
+    _,
+    /* eslint-enable @typescript-eslint/no-unused-vars */
+
+    // cli-only flags that get transformed below
+    multiple,
+    multipleBranches,
+    multipleCommits,
+    all,
+
+    // shorthands
+    repo,
+
+    // filters
+    author,
+
+    // negation flags
+    noCherryPickRef,
+    noFork,
+    noStatusComment,
+    noVerify,
+    verify,
+    nonInteractive,
+
+    // singular array types → renamed to plural
+    assignee,
+    path,
+    reviewer,
+    sourcePRLabel,
+    targetBranch,
+    targetBranchChoice,
+    targetPRLabel,
+
+    ...restOptions
+  } = rawArgs;
+
+  // resolve --repo owner/name → repoOwner + repoName
+  const [repoOwner, repoName] = repo?.split('/') ?? [
+    restOptions.repoOwner,
+    restOptions.repoName,
+  ];
+
+  // resolve --editor false → editor: undefined
+  const editor =
+    restOptions.editor === 'false' ? undefined : restOptions.editor;
+
+  return excludeUndefined({
+    ...restOptions,
+
+    // repo
+    repoOwner,
+    repoName,
+
+    // editor
+    editor,
+
+    // --all sets author to null (show all commits)
+    author: all ? null : author,
+
+    // --multiple is a cli-only shorthand for both multipleBranches + multipleCommits
+    multipleBranches: multiple ?? multipleBranches,
+    multipleCommits: multiple ?? multipleCommits,
+
+    // rename singular array types to plural (matches config option names)
+    assignees: assignee,
+    commitPaths: path,
+    reviewers: reviewer,
+    sourcePRLabels: sourcePRLabel,
+    targetBranchChoices: targetBranchChoice,
+    targetBranches: targetBranch,
+    targetPRLabels: targetPRLabel,
+
+    // negation flags → resolved to their canonical option names
+    cherryPickRef: noCherryPickRef === true ? false : restOptions.cherryPickRef,
+    fork: noFork === true ? false : restOptions.fork,
+    noVerify: verify ?? noVerify,
+    publishStatusCommentOnSuccess: noStatusComment === true ? false : undefined,
+    publishStatusCommentOnFailure: noStatusComment === true ? false : undefined,
+    publishStatusCommentOnAbort: noStatusComment === true ? false : undefined,
+    interactive: nonInteractive === true ? false : undefined,
+  });
+}

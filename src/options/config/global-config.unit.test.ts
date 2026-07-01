@@ -1,0 +1,116 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import {
+  getGlobalConfig,
+  createGlobalConfigIfNotExist,
+} from './global-config.js';
+
+describe('config', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  beforeEach(() => {
+    vi.spyOn(os, 'homedir').mockReturnValue('/myHomeDir');
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as any);
+  });
+
+  describe('getGlobalConfig', () => {
+    let res: Awaited<ReturnType<typeof getGlobalConfig>>;
+    beforeEach(async () => {
+      vi.spyOn(fs, 'chmod').mockResolvedValueOnce();
+      vi.spyOn(fs, 'writeFile').mockResolvedValueOnce();
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+        JSON.stringify({
+          githubToken: 'myAccessToken',
+        }),
+      );
+      res = await getGlobalConfig();
+    });
+
+    it("should create config if it doesn't exist", () => {
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/myHomeDir/.backport/config.json',
+        expect.any(String),
+        { flag: 'wx', mode: 384 },
+      );
+    });
+
+    it("should create .backport folder if it doesn't exist", () => {
+      expect(fs.mkdir).toHaveBeenCalledWith('/myHomeDir/.backport', {
+        recursive: true,
+      });
+    });
+
+    it('should load config', () => {
+      expect(fs.readFile).toHaveBeenCalledWith(
+        '/myHomeDir/.backport/config.json',
+        'utf8',
+      );
+    });
+
+    it('should return config', () => {
+      expect(res).toEqual({
+        githubToken: 'myAccessToken',
+      });
+    });
+
+    it('should load config using legacy accessToken (backward compat)', async () => {
+      vi.spyOn(fs, 'chmod').mockResolvedValueOnce();
+      vi.spyOn(fs, 'writeFile').mockResolvedValueOnce();
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce(
+        JSON.stringify({
+          accessToken: 'myLegacyToken',
+        }),
+      );
+      const resLegacy = await getGlobalConfig();
+      expect(resLegacy).toEqual({
+        githubToken: 'myLegacyToken',
+      });
+    });
+  });
+
+  describe('createGlobalConfigIfNotExist', () => {
+    it("should create config if it does't exist", async () => {
+      vi.spyOn(fs, 'writeFile').mockResolvedValueOnce();
+      const didCreate = await createGlobalConfigIfNotExist(
+        '/path/to/globalConfig',
+        'myConfigTemplate',
+      );
+
+      expect(didCreate).toEqual(true);
+
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/path/to/globalConfig',
+        expect.stringContaining('myConfigTemplate'),
+        { flag: 'wx', mode: 384 },
+      );
+    });
+
+    it('should not fail if config already exists', async () => {
+      const err = new Error('EEXIST');
+      (err as any).code = 'EEXIST';
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(err);
+
+      const didCreate = await createGlobalConfigIfNotExist(
+        '/path/to/global/config.json',
+        'myConfigTemplate',
+      );
+
+      expect(didCreate).toEqual(false);
+    });
+
+    it("should fail gracefully if .backport folder doesn't exist", async () => {
+      const err = new Error('ENOENT');
+      (err as any).code = 'ENOENT';
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(err);
+
+      await expect(() =>
+        createGlobalConfigIfNotExist(
+          '/path/to/global/config.json',
+          'myConfigTemplate',
+        ),
+      ).rejects.toThrow(
+        'The .backport folder (/path/to/global/config.json) does not exist.',
+      );
+    });
+  });
+});

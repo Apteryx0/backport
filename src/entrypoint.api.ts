@@ -1,42 +1,33 @@
-import './lib/apm';
-import apm from 'elastic-apm-node';
-import { backportRun as run } from './backportRun';
-import { BackportResponse } from './backportRun';
-import { fetchCommitsByPullNumber } from './lib/github/v4/fetchCommits/fetchCommitByPullNumber';
-import { fetchCommitBySha } from './lib/github/v4/fetchCommits/fetchCommitBySha';
-import { fetchCommitsByAuthor } from './lib/github/v4/fetchCommits/fetchCommitsByAuthor';
-import { fetchPullRequestsBySearchQuery } from './lib/github/v4/fetchCommits/fetchPullRequestsBySearchQuery';
-import { getOptionsFromGithub as _getOptionsFromGithub } from './lib/github/v4/getOptionsFromGithub/getOptionsFromGithub';
-import { initLogger } from './lib/logger';
-import type { Commit } from './lib/sourceCommit/parseSourceCommit';
-import { ConfigFileOptions } from './options/ConfigOptions';
-import { ValidConfigOptions } from './options/options';
-import { excludeUndefined } from './utils/excludeUndefined';
+/** Public module API for programmatic consumers. Re-exports types and wraps backportRun. */
+import { backportRun as run } from './backport-run.js';
+import type { BackportResponse } from './backport-run.js';
+import { fetchCommitsByPullNumber } from './lib/github/v4/fetchCommits/fetch-commit-by-pull-number.js';
+import { fetchCommitBySha } from './lib/github/v4/fetchCommits/fetch-commit-by-sha.js';
+import { fetchCommitsByAuthor } from './lib/github/v4/fetchCommits/fetch-commits-by-author.js';
+import { fetchPullRequestsBySearchQuery } from './lib/github/v4/fetchCommits/fetch-pull-requests-by-search-query.js';
+import { getOptionsFromGithub as _getOptionsFromGithub } from './lib/github/v4/getOptionsFromGithub/get-options-from-github.js';
+import { initLogger } from './lib/logger.js';
+import type { Commit } from './lib/sourceCommit/parse-source-commit.js';
+import type { ConfigFileOptions } from './options/config-options.js';
+import type { ValidConfigOptions } from './options/options.js';
+import { excludeUndefined } from './utils/exclude-undefined.js';
 
 // public API
-export type {
-  HandledErrorResult,
-  SuccessResult,
-  UnhandledErrorResult,
-} from './runSequentially';
-export type {
-  BackportAbortResponse,
-  BackportFailureResponse,
-  BackportResponse,
-  BackportSuccessResponse,
-} from './backportRun';
-export type { Commit } from './lib/sourceCommit/parseSourceCommit';
-export type { ConfigFileOptions } from './options/ConfigOptions';
-export { getTargetBranchFromLabel } from './lib/sourceCommit/getPullRequestStates';
-export { BackportError } from './lib/BackportError';
-export { getGlobalConfig } from './options/config/globalConfig';
-export { getProjectConfig } from './options/config/projectConfig';
+export type { ErrorResult, SuccessResult } from './lib/run-sequentially.js';
+export type { BackportResponse } from './backport-run.js';
+export type { Commit } from './lib/sourceCommit/parse-source-commit.js';
+export type { ConfigFileOptions } from './options/config-options.js';
+export { getTargetBranchFromLabel } from './lib/sourceCommit/get-pull-request-states.js';
+export { BackportError } from './lib/backport-error.js';
+export type { BackportErrorCode, ErrorContext } from './lib/backport-error.js';
+export { getGlobalConfig } from './options/config/global-config.js';
+export { getProjectConfig } from './options/config/project-config.js';
 
 // wrap `getOptionsFromGithub` with logger
 export function getOptionsFromGithub(
   options: Parameters<typeof _getOptionsFromGithub>[0],
 ) {
-  initLogger({ interactive: false, accessToken: options.accessToken });
+  initLogger({ interactive: false, githubToken: options.githubToken });
   return _getOptionsFromGithub(options);
 }
 
@@ -56,110 +47,87 @@ export async function backportRun({
   processArgs?: string[];
   exitCodeOnFailure?: boolean;
 }): Promise<BackportResponse> {
-  const apmTransaction = apm.startTransaction('API: backportRun');
-  const res = await run({
+  return run({
     optionsFromModule: excludeUndefined(options),
     processArgs,
     exitCodeOnFailure,
-    apmTransaction,
   });
-
-  apm.endTransaction(res.status);
-  return res;
 }
 
 export async function getCommits(options: {
   // required
-  accessToken: string;
+  githubToken: string;
   repoName: string;
   repoOwner: string;
 
   // optional
   author?: string;
   branchLabelMapping?: ValidConfigOptions['branchLabelMapping'];
-  dateSince?: string;
-  dateUntil?: string;
+  since?: string;
+  until?: string;
   githubApiBaseUrlV4?: string;
-  maxNumber?: number;
+  maxCount?: number;
   onlyMissing?: boolean;
-  prFilter?: string;
+  prQuery?: string;
   pullNumber?: number | number[];
   sha?: string | string[];
   skipRemoteConfig?: boolean;
   sourceBranch?: string;
 }): Promise<Commit[]> {
-  return apmStartTransaction('API: getCommits', async () => {
-    initLogger({ interactive: false, accessToken: options.accessToken });
+  initLogger({ interactive: false, githubToken: options.githubToken });
 
-    const optionsFromGithub = await _getOptionsFromGithub(options);
+  const optionsFromGithub = await _getOptionsFromGithub(options);
 
-    if (options.pullNumber) {
-      const pullNumbers = Array.isArray(options.pullNumber)
-        ? options.pullNumber
-        : [options.pullNumber];
+  if (options.pullNumber) {
+    const pullNumbers = Array.isArray(options.pullNumber)
+      ? options.pullNumber
+      : [options.pullNumber];
 
-      const nestedCommits = await Promise.all(
-        pullNumbers.map((pullNumber) =>
-          fetchCommitsByPullNumber({
-            ...optionsFromGithub,
-            ...options,
-            pullNumber,
-          }),
-        ),
-      );
-
-      return nestedCommits.flat();
-    }
-
-    if (options.sha) {
-      const shas = Array.isArray(options.sha) ? options.sha : [options.sha];
-
-      return Promise.all(
-        shas.map((sha) =>
-          fetchCommitBySha({ ...optionsFromGithub, ...options, sha }),
-        ),
-      );
-    }
-
-    if (options.prFilter) {
-      return fetchPullRequestsBySearchQuery({
-        ...optionsFromGithub,
-        ...options,
-        prFilter: options.prFilter,
-        author: options.author ?? null,
-        dateSince: options.dateSince ?? null,
-        dateUntil: options.dateUntil ?? null,
-      });
-    }
-
-    if (options.author) {
-      return fetchCommitsByAuthor({
-        ...optionsFromGithub,
-        ...options,
-        author: options.author,
-        dateSince: options.dateSince ?? null,
-        dateUntil: options.dateUntil ?? null,
-      });
-    }
-
-    throw new Error(
-      'Must supply one of: `pullNumber`, `sha`, `prFilter` or `author`',
+    const nestedCommits = await Promise.all(
+      pullNumbers.map((pullNumber) =>
+        fetchCommitsByPullNumber({
+          ...optionsFromGithub,
+          ...options,
+          pullNumber,
+        }),
+      ),
     );
-  });
-}
 
-async function apmStartTransaction<T>(
-  transactionName: string,
-  cb: () => Promise<T>,
-): Promise<T> {
-  apm.startTransaction(transactionName);
-  try {
-    const res = await cb();
-    apm.endTransaction('success');
-    return res;
-  } catch (e) {
-    apm.captureError(e as Error);
-    apm.endTransaction('failure');
-    throw e;
+    return nestedCommits.flat();
   }
+
+  if (options.sha) {
+    const shas = Array.isArray(options.sha) ? options.sha : [options.sha];
+
+    return Promise.all(
+      shas.map((sha) =>
+        fetchCommitBySha({ ...optionsFromGithub, ...options, sha }),
+      ),
+    );
+  }
+
+  if (options.prQuery) {
+    return fetchPullRequestsBySearchQuery({
+      ...optionsFromGithub,
+      ...options,
+      prQuery: options.prQuery,
+      author: options.author ?? null,
+      since: options.since ?? null,
+      until: options.until ?? null,
+    });
+  }
+
+  if (options.author) {
+    return fetchCommitsByAuthor({
+      ...optionsFromGithub,
+      ...options,
+      author: options.author,
+      since: options.since ?? null,
+      until: options.until ?? null,
+    });
+  }
+
+  throw new Error(
+    'Must supply one of: `pullNumber`, `sha`, `prQuery` or `author`',
+  );
 }

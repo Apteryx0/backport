@@ -1,0 +1,225 @@
+import type { GithubConfigOptionsQuery } from '../../../../graphql/generated/graphql.js';
+import { graphql } from '../../../../graphql/generated/index.js';
+import type { ConfigFileOptions } from '../../../../options/config-options.js';
+import { BackportError } from '../../../backport-error.js';
+import {
+  getLocalConfigFileCommitDate,
+  isLocalConfigFileUntracked,
+  isLocalConfigFileModified,
+} from '../../../git/index.js';
+import { logger } from '../../../logger.js';
+import {
+  parseRemoteConfigFile,
+  isMissingConfigFileException,
+} from '../../../remote-config.js';
+import type { OperationResultWithMeta } from '../client/graphql-client.js';
+import { graphqlRequest } from '../client/graphql-client.js';
+import { getInvalidGithubTokenMessage } from '../get-invalid-github-token-message.js';
+
+// fetches the default source branch for the repo (normally "master")
+// startup checks:
+// - verify the github token
+// - ensure no branch named "backport" exists
+
+export type OptionsFromGithub = Awaited<
+  ReturnType<typeof getOptionsFromGithub>
+>;
+export async function getOptionsFromGithub(options: {
+  githubToken: string;
+  cwd?: string;
+  githubApiBaseUrlV4?: string;
+  repoName: string;
+  repoOwner: string;
+  skipRemoteConfig?: boolean;
+  globalConfigFile?: string;
+  sourceBranch?: string;
+}) {
+  const {
+    githubToken,
+    githubApiBaseUrlV4,
+    repoName,
+    repoOwner,
+    globalConfigFile,
+  } = options;
+
+  const query = graphql(`
+    query GithubConfigOptions($repoOwner: String!, $repoName: String!) {
+      viewer {
+        login
+      }
+      repository(owner: $repoOwner, name: $repoName) {
+        # check to see if a branch named "backport" exists
+        illegalBackportBranch: ref(qualifiedName: "refs/heads/backport") {
+          id
+        }
+        isPrivate
+        defaultBranchRef {
+          name
+          target {
+            __typename
+            ...RemoteConfigHistoryFragment
+          }
+        }
+      }
+    }
+  `);
+
+  const variables = { repoOwner, repoName };
+  const result = await graphqlRequest(
+    { githubToken, githubApiBaseUrlV4 },
+    query,
+    variables,
+  );
+
+  if (result.error) {
+    const invalidGithubTokenMessage = getInvalidGithubTokenMessage({
+      result,
+      repoName,
+      repoOwner,
+      globalConfigFile,
+      githubToken,
+    });
+
+    if (invalidGithubTokenMessage) {
+      throw new BackportError({
+        code: 'invalid-credentials-exception',
+        message: invalidGithubTokenMessage,
+      });
+    }
+
+    if (!isMissingConfigFileException(result)) {
+      throw new BackportError({
+        code: 'github-api-exception',
+        message: result.error.message,
+      });
+    }
+  }
+
+  const insufficientPermissionsErrorMessage =
+    getInsufficientPermissionsErrorMessage(result);
+
+  if (insufficientPermissionsErrorMessage) {
+    throw new BackportError({
+      code: 'invalid-credentials-exception',
+      message: insufficientPermissionsErrorMessage,
+    });
+  }
+
+  const { data } = result;
+
+  // it is not possible to have a branch named "backport"
+  if (data?.repository?.illegalBackportBranch) {
+    throw new BackportError({
+      code: 'config-error-exception',
+      message:
+        'You must delete the branch "backport" to continue. See https://github.com/sorenlouv/backport/issues/155 for details',
+    });
+  }
+
+  const remoteConfig = await getRemoteConfigFileOptions(
+    data,
+    options.cwd,
+    options.skipRemoteConfig,
+  );
+
+  if (!data) {
+    throw new BackportError({
+      code: 'config-error-exception',
+      message:
+        'Failed to fetch options from GitHub. Please check your GitHub token and repository settings.',
+    });
+  }
+
+  return {
+    authenticatedUsername: data.viewer.login,
+    sourceBranch:
+      options.sourceBranch ?? data.repository?.defaultBranchRef?.name ?? 'main',
+    isRepoPrivate: data.repository?.isPrivate,
+    ...remoteConfig,
+  };
+}
+
+async function getRemoteConfigFileOptions(
+  res: GithubConfigOptionsQuery | undefined,
+  cwd?: string,
+  skipRemoteConfig?: boolean,
+): Promise<ConfigFileOptions | undefined> {
+  if (skipRemoteConfig) {
+    logger.info(
+      'Remote config: Skipping. `--skip-remote-config` specified via config file or cli',
+    );
+    return;
+  }
+
+  if (res?.repository?.defaultBranchRef?.target?.__typename !== 'Commit') {
+    logger.info('Remote config: Skipping. Default branch is not a commit');
+    return;
+  }
+
+  const remoteConfig =
+    res.repository.defaultBranchRef.target.remoteConfigHistory.edges?.at(
+      0,
+    )?.remoteConfig;
+
+  if (!remoteConfig) {
+    logger.info("Remote config: Skipping. Remote config doesn't exist");
+    return;
+  }
+
+  if (cwd) {
+    const [isLocalConfigModified, isLocalConfigUntracked, localCommitDate] =
+      await Promise.all([
+        isLocalConfigFileModified({ cwd }),
+        isLocalConfigFileUntracked({ cwd }),
+        getLocalConfigFileCommitDate({ cwd }),
+      ]);
+
+    if (isLocalConfigUntracked) {
+      logger.info('Remote config: Skipping. Local config is new');
+      return;
+    }
+
+    if (isLocalConfigModified) {
+      logger.info('Remote config: Skipping. Local config is modified');
+      return;
+    }
+
+    if (
+      localCommitDate &&
+      localCommitDate > Date.parse(String(remoteConfig.committedDate))
+    ) {
+      logger.info(
+        `Remote config: Skipping. Local config is newer: ${new Date(
+          localCommitDate,
+        ).toISOString()} > ${String(remoteConfig.committedDate)}`,
+      );
+      return;
+    }
+  }
+
+  logger.info('Remote config: Parsing.');
+  return parseRemoteConfigFile(remoteConfig);
+}
+
+function getInsufficientPermissionsErrorMessage(
+  res: OperationResultWithMeta<GithubConfigOptionsQuery>,
+): string | undefined {
+  const accessScopesHeader = res.responseHeaders?.get('x-oauth-scopes');
+  if (accessScopesHeader == null) {
+    return;
+  }
+
+  const tokenScopes = new Set(
+    accessScopesHeader.split(',').map((scope) => scope.trim()),
+  );
+
+  const isRepoPrivate = res.data?.repository?.isPrivate;
+
+  if (isRepoPrivate && !tokenScopes.has('repo')) {
+    return `You must grant the "repo" scope to your GitHub token`;
+  }
+
+  if (!tokenScopes.has('repo') && !tokenScopes.has('public_repo')) {
+    return `You must grant the "repo" or "public_repo" scope to your GitHub token`;
+  }
+}

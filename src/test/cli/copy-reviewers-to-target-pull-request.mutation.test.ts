@@ -1,0 +1,73 @@
+import { Octokit } from '@octokit/rest';
+import type { SuccessResult } from '../../entrypoint.api.js';
+import { getDevGithubToken } from '../helpers/get-dev-github-token.js';
+import { runBackportViaCli } from './run-backport-via-cli.js';
+
+const githubToken = getDevGithubToken();
+const octokit = new Octokit({ auth: githubToken });
+
+vi.setConfig({ testTimeout: 25_000, hookTimeout: 60_000 });
+
+describe('backport-org/repo-with-reviewed-pull-requests', () => {
+  let pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
+  beforeAll(async () => {
+    await closeOpenPullRequests(octokit);
+
+    const { output } = await runBackportViaCli([
+      '--repo=backport-org/repo-with-reviewed-pull-requests',
+      '--copy-source-pr-reviewers',
+      '--copy-source-pr-labels',
+      '--pr=2',
+      '--branch=production',
+      '--no-fork',
+      `--github-token=${githubToken}`,
+      '--json',
+    ]);
+
+    const backportResults = JSON.parse(output).results as SuccessResult[];
+    const pullRequestNumber = backportResults[0].pullRequestNumber;
+    pullRequest = await getPullRequest(pullRequestNumber);
+  });
+
+  it('copies labels over', () => {
+    const labels = pullRequest.data.labels.map((l) => l.name);
+    expect(labels).toEqual([
+      'documentation',
+      'enhancement',
+      'good first issue',
+    ]);
+  });
+
+  it('copies reviewers over', () => {
+    const reviewers = pullRequest.data.requested_reviewers?.map((r) => r.login);
+    expect(reviewers).toEqual(['backport-demo-user']);
+  });
+});
+
+function getPullRequest(pr: number) {
+  return octokit.pulls.get({
+    owner: 'backport-org',
+    repo: 'repo-with-reviewed-pull-requests',
+    pull_number: pr,
+  });
+}
+
+async function closeOpenPullRequests(octokit: Octokit) {
+  const openPulls = await octokit.pulls.list({
+    owner: 'backport-org',
+    repo: 'repo-with-reviewed-pull-requests',
+    state: 'open',
+  });
+
+  await Promise.all(
+    openPulls.data.map(async (pull) => {
+      // close pull request
+      await octokit.pulls.update({
+        owner: 'backport-org',
+        repo: 'repo-with-reviewed-pull-requests',
+        pull_number: pull.number,
+        state: 'closed',
+      });
+    }),
+  );
+}

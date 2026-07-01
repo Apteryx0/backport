@@ -1,0 +1,464 @@
+import { Octokit } from '@octokit/rest';
+import type { BackportResponse, SuccessResult } from '../../entrypoint.api.js';
+import { backportRun } from '../../entrypoint.api.js';
+import { getShortSha } from '../../lib/github/commit-formatters.js';
+import { getDevGithubToken } from '../helpers/get-dev-github-token.js';
+import { getSandboxPath, resetSandbox } from '../helpers/sandbox.js';
+
+vi.unmock('find-up');
+vi.unmock('del');
+vi.unmock('make-dir');
+
+vi.setConfig({ testTimeout: 25_000, hookTimeout: 25_000 });
+
+const githubToken = getDevGithubToken();
+const octokit = new Octokit({ auth: githubToken });
+const sandboxPath = getSandboxPath({ filename: import.meta.filename });
+
+// repo
+const REPO_OWNER = 'backport-org';
+const REPO_NAME = 'integration-test';
+const AUTHOR = 'sorenlouv';
+
+// commit 1
+const COMMIT_SHA_1 = '5bf29b7d847ea3dbde9280448f0f62ad0f22d3ad';
+const BRANCH_WITH_ONE_COMMIT = `backport/7.x/commit-${getShortSha(
+  COMMIT_SHA_1,
+)}`;
+
+// commit 2
+const COMMIT_SHA_2 = '59d6ff1ca90a4ce210c0a4f0e159214875c19d60';
+const BRANCH_WITH_TWO_COMMITS = `backport/7.x/commit-${getShortSha(
+  COMMIT_SHA_1,
+)}_commit-${getShortSha(COMMIT_SHA_2)}`;
+
+describe('entrypoint.module', () => {
+  describe('when a single commit is backported', () => {
+    let res: BackportResponse;
+    let pullRequestResponse: Awaited<ReturnType<typeof octokit.pulls.get>>;
+
+    beforeAll(async () => {
+      await resetState(githubToken);
+      res = await backportRun({
+        options: {
+          workdir: sandboxPath,
+          githubToken,
+          repoOwner: 'backport-org',
+          repoName: 'integration-test',
+          sha: COMMIT_SHA_1,
+          targetBranches: ['7.x'],
+        },
+      });
+
+      const pullRequestNumber = (res.results[0] as SuccessResult)
+        .pullRequestNumber;
+
+      pullRequestResponse = await octokit.pulls.get({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        pull_number: pullRequestNumber,
+      });
+    });
+
+    it('returns the backport result', () => {
+      expect(res).toEqual({
+        commits: [
+          {
+            author: { email: 'sorenlouv@gmail.com', name: 'Søren Louv-Jansen' },
+            targetPullRequestStates: [],
+            sourceBranch: 'master',
+            sourceCommit: {
+              committedDate: '2020-08-15T10:37:41Z',
+              message: 'Add ❤️ emoji',
+              sha: COMMIT_SHA_1,
+              branchLabelMapping: undefined,
+            },
+            suggestedTargetBranches: [],
+            sourcePullRequest: undefined,
+          },
+        ],
+        results: [
+          {
+            pullRequestNumber: expect.any(Number),
+            pullRequestUrl: expect.stringContaining(
+              'https://github.com/backport-org/integration-test/pull/',
+            ),
+            status: 'success',
+            targetBranch: '7.x',
+          },
+        ],
+      });
+    });
+
+    it('pull request: status code', () => {
+      expect(pullRequestResponse.status).toEqual(200);
+    });
+
+    it('pull request: title', () => {
+      expect(pullRequestResponse.data.title).toEqual('[7.x] Add ❤️ emoji');
+    });
+
+    it('pull request: body', () => {
+      expect(pullRequestResponse.data.body).toMatchInlineSnapshot(`
+        "# Backport
+
+        This will backport the following commits from \`master\` to \`7.x\`:
+         - Add ❤️ emoji (5bf29b7d)
+
+        <!--- Backport version: 1.2.3-mocked -->
+
+        ### Questions ?
+        Please refer to the [Backport tool documentation](https://github.com/sorenlouv/backport)"
+      `);
+    });
+
+    it('pull request: head branch is in fork repo', () => {
+      expect(pullRequestResponse.data.head.label).toEqual(
+        `sorenlouv:${BRANCH_WITH_ONE_COMMIT}`,
+      );
+    });
+
+    it('pull request: base branch', () => {
+      expect(pullRequestResponse.data.base.label).toEqual('backport-org:7.x');
+    });
+
+    it('does not create any new branches in origin (backport-org/integration-test)', async () => {
+      const branches = await getBranchesOnGithub({
+        githubToken,
+        repoOwner: REPO_OWNER,
+        repoName: REPO_NAME,
+      });
+      expect(branches.map((b) => b.name)).toEqual(['7.x', 'master']);
+    });
+
+    it('creates a branch in the fork (sorenlouv/integration-test)', async () => {
+      const branches = await getBranchesOnGithub({
+        githubToken,
+        repoOwner: AUTHOR,
+        repoName: REPO_NAME,
+      });
+
+      expect(branches.map((b) => b.name)).toEqual([
+        '7.x',
+        BRANCH_WITH_ONE_COMMIT,
+        'master',
+      ]);
+    });
+  });
+
+  describe('when two commits are backported', () => {
+    let res: BackportResponse;
+    let pullRequestResponse: Awaited<ReturnType<typeof octokit.pulls.get>>;
+
+    beforeAll(async () => {
+      await resetState(githubToken);
+      res = await backportRun({
+        options: {
+          workdir: sandboxPath,
+          githubToken,
+          repoOwner: 'backport-org',
+          repoName: 'integration-test',
+          sha: [COMMIT_SHA_1, COMMIT_SHA_2],
+          targetBranches: ['7.x'],
+        },
+      });
+
+      const pullRequestNumber = (res.results[0] as SuccessResult)
+        .pullRequestNumber;
+
+      pullRequestResponse = await octokit.pulls.get({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        pull_number: pullRequestNumber,
+      });
+    });
+
+    it('returns the backport result containing both commits', () => {
+      expect(res).toEqual({
+        commits: [
+          {
+            author: { email: 'sorenlouv@gmail.com', name: 'Søren Louv-Jansen' },
+            targetPullRequestStates: [],
+            sourceBranch: 'master',
+            sourceCommit: {
+              committedDate: '2020-08-15T10:37:41Z',
+              message: 'Add ❤️ emoji',
+              sha: COMMIT_SHA_1,
+              branchLabelMapping: undefined,
+            },
+            suggestedTargetBranches: [],
+            sourcePullRequest: undefined,
+          },
+          {
+            author: { email: 'sorenlouv@gmail.com', name: 'Søren Louv-Jansen' },
+            suggestedTargetBranches: [],
+            targetPullRequestStates: [],
+            sourceBranch: 'master',
+            sourceCommit: {
+              committedDate: '2020-08-15T10:44:04Z',
+              message: 'Add family emoji (#2)',
+              sha: COMMIT_SHA_2,
+            },
+            sourcePullRequest: undefined,
+          },
+        ],
+        results: [
+          {
+            pullRequestNumber: expect.any(Number),
+            pullRequestUrl: expect.stringContaining(
+              'https://github.com/backport-org/integration-test/pull/',
+            ),
+            status: 'success',
+            targetBranch: '7.x',
+          },
+        ],
+      });
+    });
+
+    it('pull request: status code', () => {
+      expect(pullRequestResponse.status).toEqual(200);
+    });
+
+    it('pull request: title', () => {
+      expect(pullRequestResponse.data.title).toEqual(
+        '[7.x] Add ❤️ emoji | Add family emoji (#2)',
+      );
+    });
+
+    it('pull request: body', () => {
+      expect(pullRequestResponse.data.body).toMatchInlineSnapshot(`
+        "# Backport
+
+        This will backport the following commits from \`master\` to \`7.x\`:
+         - Add ❤️ emoji (5bf29b7d)
+         - Add family emoji (#2) (59d6ff1c)
+
+        <!--- Backport version: 1.2.3-mocked -->
+
+        ### Questions ?
+        Please refer to the [Backport tool documentation](https://github.com/sorenlouv/backport)"
+      `);
+    });
+
+    it('pull request: head branch contains both commits in name', () => {
+      expect(pullRequestResponse.data.head.label).toEqual(
+        `sorenlouv:${BRANCH_WITH_TWO_COMMITS}`,
+      );
+    });
+
+    it('pull request: base branch', () => {
+      expect(pullRequestResponse.data.base.label).toEqual('backport-org:7.x');
+    });
+  });
+
+  describe('when disabling fork mode', () => {
+    let res: BackportResponse;
+    let pullRequestResponse: Awaited<ReturnType<typeof octokit.pulls.get>>;
+
+    beforeAll(async () => {
+      await resetState(githubToken);
+      res = await backportRun({
+        options: {
+          fork: false,
+          workdir: sandboxPath,
+          githubToken,
+          repoOwner: 'backport-org',
+          repoName: 'integration-test',
+          sha: COMMIT_SHA_1,
+          targetBranches: ['7.x'],
+        },
+      });
+
+      const pullRequestNumber = (res.results[0] as SuccessResult)
+        .pullRequestNumber;
+
+      pullRequestResponse = await octokit.pulls.get({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        pull_number: pullRequestNumber,
+      });
+    });
+
+    it('pull request: title', () => {
+      expect(pullRequestResponse.data.title).toEqual('[7.x] Add ❤️ emoji');
+    });
+
+    it('pull request: body', () => {
+      expect(pullRequestResponse.data.body).toMatchInlineSnapshot(`
+        "# Backport
+
+        This will backport the following commits from \`master\` to \`7.x\`:
+         - Add ❤️ emoji (5bf29b7d)
+
+        <!--- Backport version: 1.2.3-mocked -->
+
+        ### Questions ?
+        Please refer to the [Backport tool documentation](https://github.com/sorenlouv/backport)"
+      `);
+    });
+
+    it('pull request: head branch is in origin (non-fork) repo', () => {
+      expect(pullRequestResponse.data.head.label).toEqual(
+        `backport-org:${BRANCH_WITH_ONE_COMMIT}`,
+      );
+    });
+
+    it('pull request: base branch', () => {
+      expect(pullRequestResponse.data.base.label).toEqual('backport-org:7.x');
+    });
+
+    it('returns pull request', () => {
+      expect(res).toEqual({
+        commits: [
+          {
+            author: { email: 'sorenlouv@gmail.com', name: 'Søren Louv-Jansen' },
+            targetPullRequestStates: [],
+            sourceBranch: 'master',
+            sourceCommit: {
+              committedDate: '2020-08-15T10:37:41Z',
+              message: 'Add ❤️ emoji',
+              sha: COMMIT_SHA_1,
+              branchLabelMapping: undefined,
+            },
+            suggestedTargetBranches: [],
+            sourcePullRequest: undefined,
+          },
+        ],
+        results: [
+          {
+            pullRequestNumber: expect.any(Number),
+            pullRequestUrl: expect.stringContaining(
+              'https://github.com/backport-org/integration-test/pull/',
+            ),
+            status: 'success',
+            targetBranch: '7.x',
+          },
+        ],
+      });
+    });
+
+    it('creates a new branch in origin (backport-org/integration-test)', async () => {
+      const branches = await getBranchesOnGithub({
+        githubToken,
+        repoOwner: REPO_OWNER,
+        repoName: REPO_NAME,
+      });
+      expect(branches.map((b) => b.name)).toEqual([
+        '7.x',
+        BRANCH_WITH_ONE_COMMIT,
+        'master',
+      ]);
+    });
+
+    it('does not create branches in the fork (sorenlouv/integration-test)', async () => {
+      const branches = await getBranchesOnGithub({
+        githubToken,
+        repoOwner: AUTHOR,
+        repoName: REPO_NAME,
+      });
+      expect(branches.map((b) => b.name)).toEqual(['7.x', 'master']);
+    });
+  });
+});
+
+async function getBranchesOnGithub({
+  githubToken,
+  repoOwner,
+  repoName,
+}: {
+  githubToken: string;
+  repoOwner: string;
+  repoName: string;
+}) {
+  const octokit = new Octokit({
+    auth: githubToken,
+  });
+
+  const res = await octokit.repos.listBranches({
+    owner: repoOwner,
+    repo: repoName,
+  });
+
+  return res.data;
+}
+
+async function deleteBranchOnGithub({
+  githubToken,
+  repoOwner,
+  repoName,
+  branchName,
+}: {
+  githubToken: string;
+  repoOwner: string;
+  repoName: string;
+  branchName: string;
+}) {
+  try {
+    const octokit = new Octokit({
+      auth: githubToken,
+    });
+
+    const opts = {
+      owner: repoOwner,
+      repo: repoName,
+      ref: `heads/${branchName}`,
+    };
+
+    const res = await octokit.git.deleteRef(opts);
+
+    return res.data;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === 'Reference does not exist'
+    ) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function resetState(githubToken: string) {
+  const ownerBranches = await getBranchesOnGithub({
+    githubToken,
+    repoOwner: REPO_OWNER,
+    repoName: REPO_NAME,
+  });
+
+  // delete all branches except master and 7.x
+  await Promise.all(
+    ownerBranches
+      .filter((b) => b.name !== 'master' && b.name !== '7.x')
+      .map((b) => {
+        return deleteBranchOnGithub({
+          githubToken,
+          repoOwner: REPO_OWNER,
+          repoName: REPO_NAME,
+          branchName: b.name,
+        });
+      }),
+  );
+
+  const forkBranches = await getBranchesOnGithub({
+    githubToken,
+    repoOwner: AUTHOR,
+    repoName: REPO_NAME,
+  });
+
+  // delete all branches except master and 7.x
+  await Promise.all(
+    forkBranches
+      .filter((b) => b.name !== 'master' && b.name !== '7.x')
+      .map((b) => {
+        return deleteBranchOnGithub({
+          githubToken,
+          repoOwner: AUTHOR,
+          repoName: REPO_NAME,
+          branchName: b.name,
+        });
+      }),
+  );
+
+  await resetSandbox(sandboxPath);
+}

@@ -3,12 +3,15 @@
 	<p>
     <b>A CLI tool that automates the process of backporting commits.</b>
 	</p>
+	<p>
+    <a href="https://www.npmjs.com/package/backport"><img src="https://img.shields.io/npm/v/backport.svg" alt="npm version"></a>
+	</p>
 	<br>
 </div>
 
 ## 🎉 New: The Backport Tool as a Github Action 🎉
 
-A [Github Action](https://github.com/sqren/backport-github-action) around The Backport Tool now exists. It makes it a breeze to get automatic backports when pull requests are merged.
+A [Github Action](https://github.com/sorenlouv/backport-github-action) around The Backport Tool now exists. It makes it a breeze to get automatic backports when pull requests are merged.
 
 # Backport CLI tool
 
@@ -24,7 +27,7 @@ The remaining documentation focuses on the Backport CLI tool (not the Github Act
 
 ## Requirements
 
-- Node 16 or higher
+- Node 22 or higher
 - git
 
 ## Install
@@ -33,7 +36,7 @@ The remaining documentation focuses on the Backport CLI tool (not the Github Act
 npm install -g backport
 ```
 
-After installation you should add an access token to the [global config](/docs/config-file-options.md#global-config-backportconfigjson) in `~/.backport/config.json`. See the [documentation](/docs/config-file-options.md#accesstoken-required) for how the access token is generated.
+After installation you should add an access token to the [global config](/docs/configuration.md#global-config-backportconfigjson) in `~/.backport/config.json`. See the [documentation](/docs/configuration.md#githubtoken-required) for how the access token is generated.
 
 ## Quick start
 
@@ -41,7 +44,7 @@ After installation you should add an access token to the [global config](/docs/c
 npm install backport
 ```
 
-Add a [project config](/docs/config-file-options.md#project-config-backportrcjson) to the root of your repository:
+Add a [project config](/docs/configuration.md#project-config-backportrcjson) to the root of your repository:
 
 ```js
 // .backportrc.json
@@ -65,12 +68,12 @@ Add a [project config](/docs/config-file-options.md#project-config-backportrcjso
 }
 ```
 
-Add personal access token to [global config](/docs/config-file-options.md#global-config-backportconfigjson):
+Add personal access token to [global config](/docs/configuration.md#global-config-backportconfigjson):
 
 ```js
 // ~/.backport/config.json
 {
-  "accessToken": "ghp_very_secret"
+  "githubToken": "ghp_very_secret"
 }
 ```
 
@@ -84,9 +87,8 @@ _This will start an interactive prompt. You can use your keyboards arrow keys to
 
 ## Documentation
 
-- [Config file options](/docs/config-file-options.md)
-- [CLI options](/docs/cli-options.md)
-- [Module API](/docs/api.md)
+- [Configuration Options](/docs/configuration.md)
+- [Programmatic API](/docs/api.md)
 
 ### What is backporting?
 
@@ -110,10 +112,10 @@ This tools is for anybody who is working on a codebase where they have to mainta
 - backport a commit by specifying a PR: `backport --pr 1337`
 - list and backport commits by a particular user: `backport --author john`
 - list and backport commits by a particular path: `backport --path src/plugins/chatbot`
-- list PRs filtered by a query: `backport --pr-filter label:backport-v2` (will list commits from PRs with the label "backport-v2")
+- list PRs filtered by a query: `backport --pr-query label:backport-v2` (will list commits from PRs with the label "backport-v2")
 - forward port commits: `backport --source-branch 7.x --branch master` (will forwardport from 7.x to master)
 - backport merge commits: `backport --mainline`
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/sqren/backport/blob/master/CONTRIBUTING.md)
+See [CONTRIBUTING.md](https://github.com/sorenlouv/backport/blob/master/CONTRIBUTING.md)

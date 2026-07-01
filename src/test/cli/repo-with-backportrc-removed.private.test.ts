@@ -1,0 +1,65 @@
+import { getDevGithubToken } from '../helpers/get-dev-github-token.js';
+import { runBackportViaCli } from './run-backport-via-cli.js';
+const githubToken = getDevGithubToken();
+
+describe('repo-with-backportrc-removed (missing .backportrc.json config file)', () => {
+  it('lists commits', async () => {
+    const { output } = await runBackportViaCli(
+      [
+        '--branch=production',
+        '--repo=backport-org/repo-with-backportrc-removed',
+        `--github-token=${githubToken}`,
+      ],
+      { waitForString: 'Select commit', timeoutSeconds: 4 },
+    );
+
+    expect(output).toMatchInlineSnapshot(`
+      "repo: backport-org/repo-with-backportrc-removed | sourceBranch: main | author: sorenlouv
+
+      ? Select commit
+      ❯ 1. Rename README.me to README.md
+        2. Merge pull request #1 from backport-org/add-readme
+        3. Create README.me
+        4. Delete .backportrc.json
+        5. Create .backportrc.json
+        6. Delete .backportrc.json
+        7. Create .backportrc.json
+
+      ↑↓ navigate • ⏎ select"
+    `);
+  });
+
+  it('backports via pr', async () => {
+    const { output } = await runBackportViaCli(
+      [
+        '--branch=production',
+        '--repo=backport-org/repo-with-backportrc-removed',
+        '--pr=1',
+        `--github-token=${githubToken}`,
+        '--dry-run',
+      ],
+      {
+        showOra: true,
+      },
+    );
+
+    expect(output).toContain('Cherry-picking: Create README.me');
+  });
+
+  it('backport by commit sha', async () => {
+    const { output } = await runBackportViaCli(
+      [
+        '--branch=production',
+        '--repo=backport-org/repo-with-backportrc-removed',
+        '--sha=be59df6912a550c8cb49ba3e18be3e512f3d608c',
+        `--github-token=${githubToken}`,
+        '--dry-run',
+      ],
+      {
+        showOra: true,
+      },
+    );
+
+    expect(output).toContain('Cherry-picking: Create README.me');
+  });
+});

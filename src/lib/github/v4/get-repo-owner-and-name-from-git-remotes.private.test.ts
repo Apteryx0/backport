@@ -1,0 +1,64 @@
+import { exec } from '../../../test/helpers/child-process-helper.js';
+import { getDevGithubToken } from '../../../test/helpers/get-dev-github-token.js';
+import { getSandboxPath, resetSandbox } from '../../../test/helpers/sandbox.js';
+import { getRepoOwnerAndNameFromGitRemotes } from './get-repo-owner-and-name-from-git-remotes.js';
+
+const sandboxPath = getSandboxPath({ filename: import.meta.filename });
+const githubToken = getDevGithubToken();
+
+describe('fetchRemoteProjectConfig', () => {
+  describe('when the remote is a fork', () => {
+    it('retrives the original owner from github', async () => {
+      await resetSandbox(sandboxPath);
+      const execOpts = { cwd: sandboxPath };
+      await exec(`git init`, execOpts);
+      await exec(
+        `git remote add sorenlouv git@github.com:sorenlouv/backport-e2e.git`,
+        execOpts,
+      );
+
+      expect(
+        await getRepoOwnerAndNameFromGitRemotes({
+          githubToken,
+          cwd: sandboxPath,
+        }),
+      ).toEqual({
+        repoName: 'backport-e2e',
+        repoOwner: 'backport-org',
+      });
+    });
+  });
+
+  describe('when none of the git remotes are found', () => {
+    it('swallows the error and returns empty', async () => {
+      await resetSandbox(sandboxPath);
+      const execOpts = { cwd: sandboxPath };
+      await exec(`git init`, execOpts);
+      await exec(`git remote add foo git@github.com:foo/kibana.git`, execOpts);
+
+      await exec(`git remote add bar git@github.com:bar/kibana.git`, execOpts);
+
+      expect(
+        await getRepoOwnerAndNameFromGitRemotes({
+          githubToken,
+          cwd: sandboxPath,
+        }),
+      ).toEqual({});
+    });
+  });
+
+  describe('when there are no git remotes', () => {
+    it('returns empty', async () => {
+      await resetSandbox(sandboxPath);
+      const execOpts = { cwd: sandboxPath };
+      await exec(`git init`, execOpts);
+
+      expect(
+        await getRepoOwnerAndNameFromGitRemotes({
+          githubToken,
+          cwd: sandboxPath,
+        }),
+      ).toEqual({});
+    });
+  });
+});

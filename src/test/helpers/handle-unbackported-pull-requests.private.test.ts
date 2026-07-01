@@ -1,0 +1,78 @@
+import type { Commit, ErrorResult } from '../../entrypoint.api.js';
+import { getCommits, backportRun } from '../../entrypoint.api.js';
+import { getDevGithubToken } from './get-dev-github-token.js';
+import { getSandboxPath, resetSandbox } from './sandbox.js';
+
+const githubToken = getDevGithubToken();
+vi.unmock('find-up');
+vi.setConfig({ testTimeout: 20_000 });
+
+describe('Handle unbackported pull requests', () => {
+  it('shows missing backports for PR number 8', async () => {
+    const commits = await getCommits({
+      githubToken: githubToken,
+      repoOwner: 'backport-org',
+      repoName: 'repo-with-conflicts',
+      pullNumber: 8,
+    });
+
+    const expectedCommit: Commit = {
+      author: { email: 'sorenlouv@gmail.com', name: 'Søren Louv-Jansen' },
+      sourceCommit: {
+        branchLabelMapping: undefined,
+        committedDate: '2021-12-16T00:03:34Z',
+        message: 'Change Barca to Braithwaite (#8)',
+        sha: '343402a748be2375325b2730fa979bcea5b96ba1',
+      },
+      sourcePullRequest: {
+        labels: ['backport-to-7.x'],
+        number: 8,
+        title: 'Change Barca to Braithwaite',
+        url: 'https://github.com/backport-org/repo-with-conflicts/pull/8',
+        mergeCommit: {
+          message: 'Change Barca to Braithwaite (#8)',
+          sha: '343402a748be2375325b2730fa979bcea5b96ba1',
+        },
+      },
+      suggestedTargetBranches: ['7.x'],
+      sourceBranch: 'main',
+      targetPullRequestStates: [
+        {
+          branchLabelMappingKey: '^backport-to-(.*)$',
+          branch: '7.x',
+          label: 'backport-to-7.x',
+          isSourceBranch: false,
+          state: 'NOT_CREATED',
+        },
+      ],
+    };
+
+    expect(commits[0]).toEqual(expectedCommit);
+  });
+
+  it('shows that backport failed because PR number 8 was not backported', async () => {
+    const sandboxPath = getSandboxPath({ filename: import.meta.filename });
+    await resetSandbox(sandboxPath);
+
+    const result = await backportRun({
+      options: {
+        githubToken: githubToken,
+        repoOwner: 'backport-org',
+        repoName: 'repo-with-conflicts',
+        pullNumber: 12,
+        targetBranches: ['7.x'],
+        workdir: sandboxPath,
+        interactive: false,
+        publishStatusCommentOnSuccess: false,
+        publishStatusCommentOnFailure: false,
+      },
+    });
+
+    const errorResult = result
+      .results[0] as ErrorResult<'merge-conflict-exception'>;
+    const commit: Commit =
+      errorResult.errorContext!.commitsWithoutBackports[0].commit;
+
+    expect(commit.sourcePullRequest?.number).toBe(8);
+  });
+});

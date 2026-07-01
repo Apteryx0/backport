@@ -1,0 +1,43 @@
+import {
+  cleanupFetchMock,
+  mockFetchResponse,
+  setupFetchMock,
+} from '../../../test/helpers/mock-fetch.js';
+import { addAssigneesToPullRequest } from './add-assignees-to-pull-request.js';
+
+describe('addAssigneesToPullRequest', () => {
+  beforeEach(() => {
+    setupFetchMock();
+  });
+
+  afterEach(() => {
+    cleanupFetchMock();
+  });
+
+  it('should add assignees to PR', async () => {
+    const pr = 216;
+    const assignees = ['sorenlouv'];
+
+    const calls = mockFetchResponse({
+      url: 'https://api.github.com/repos/elastic/kibana/issues/216/assignees',
+      method: 'POST',
+      responseBody: 'some response',
+    });
+
+    const res = await addAssigneesToPullRequest({
+      repoName: 'kibana',
+      repoOwner: 'elastic',
+      githubToken: 'my-token',
+      autoAssign: false,
+      interactive: false,
+      pullNumber: pr,
+      assignees,
+    });
+
+    expect(res).toBe(undefined);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(
+      expect.objectContaining({ assignees: ['sorenlouv'] }),
+    );
+  });
+});

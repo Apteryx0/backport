@@ -2,6 +2,11 @@
 /coverage
 /.coveralls.yml
 /dist
-/yarn-error.log
+/npm-debug.log
 .DS_Store
 /.env
+/src/graphql
+/.eslintcache
+.claude/worktrees/
+/.integration_testing/
+/backport-10.4.0.tgz

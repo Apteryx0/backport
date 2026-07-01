@@ -1,4 +1,2 @@
-#!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
-
-yarn lint
+npm run graphql:validate
+npx tsc -p tsconfig.eslint.json --noEmit

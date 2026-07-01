@@ -1,34 +1,36 @@
 /*
- * This file is included in `setupFiles` in jest.config.js
+ * This file is included in `setupFiles` in vitest config
  * It will be run once per test file
  */
 
-import * as packageVersionModule from '../../utils/packageVersion';
+import { vi } from 'vitest';
+import type * as OraModule from '../../lib/ora.js';
+import { registerHandlebarsHelpers } from '../../lib/register-handlebars-helpers.js';
+import * as packageVersionModule from '../../utils/package-version.js';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
-
-jest.mock('find-up', () => {
-  return jest.fn(async () => '/path/to/project/config');
+vi.mock('find-up', () => {
+  return { findUp: vi.fn(() => '/path/to/project/config') };
 });
 
-// @ts-expect-error
-// eslint-disable-next-line no-import-assign
-packageVersionModule.UNMOCKED_PACKAGE_VERSION =
-  packageVersionModule.PACKAGE_VERSION;
-// @ts-expect-error
-// eslint-disable-next-line no-import-assign
-packageVersionModule.PACKAGE_VERSION = '1.2.3-mocked';
+// Store the real version before mocking, accessible via globalThis
+(globalThis as any).__UNMOCKED_PACKAGE_VERSION__ =
+  packageVersionModule.getPackageVersion();
 
-jest.mock('make-dir', () => {
-  return jest.fn(() => Promise.resolve('/some/path'));
+vi.spyOn(packageVersionModule, 'getPackageVersion').mockReturnValue(
+  '1.2.3-mocked',
+);
+
+// Suppress ora spinner output in tests by always using non-interactive mode
+vi.mock('../../lib/ora', async (importOriginal) => {
+  const original = await importOriginal<typeof OraModule>();
+  return {
+    ...original,
+    ora: () => original.oraNonInteractiveMode,
+  };
 });
 
-jest.mock('del', () => {
-  return jest.fn(async (path) => `Attempted to delete ${path}`);
-});
-
-jest.mock('../../lib/logger', () => {
-  const spy = jest.fn();
+vi.mock('../../lib/logger', () => {
+  const spy = vi.fn();
   const logger = {
     spy: spy,
     info: (msg: string, meta: unknown) => spy(`[INFO] ${msg}`, meta),
@@ -38,10 +40,12 @@ jest.mock('../../lib/logger', () => {
     debug: (msg: string, meta: unknown) => spy(`[DEBUG] ${msg}`, meta),
   };
   return {
-    initLogger: jest.fn(() => logger),
-    redactAccessToken: jest.fn((str: string) => str),
-    consoleLog: jest.fn(),
-    setAccessToken: jest.fn(),
+    initLogger: vi.fn(() => logger),
+    redactGithubToken: vi.fn((str: string) => str),
+    consoleLog: vi.fn(),
+    setGithubToken: vi.fn(),
     logger,
   };
 });
+
+registerHandlebarsHelpers();

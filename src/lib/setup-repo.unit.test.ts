@@ -1,0 +1,302 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import type { MockInstance } from 'vitest';
+import type { ValidConfigOptions } from '../options/options.js';
+import type { SpyHelper } from '../types/spy-helper.js';
+import * as childProcess from './child-process-promisified.js';
+import * as gitModule from './git/index.js';
+import { oraNonInteractiveMode } from './ora.js';
+import { setupRepo } from './setup-repo.js';
+
+describe('setupRepo', () => {
+  let spawnSpy: SpyHelper<typeof childProcess.spawnPromise>;
+
+  beforeEach(() => {
+    vi.spyOn(os, 'homedir').mockReturnValue('/myHomeDir');
+    vi.spyOn(fs, 'rm').mockResolvedValue();
+
+    spawnSpy = vi
+      .spyOn(childProcess, 'spawnPromise')
+      .mockResolvedValue({ stderr: '', stdout: '', code: 0, cmdArgs: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('if an error occurs while cloning', () => {
+    it('should delete repo', async () => {
+      expect.assertions(2);
+
+      vi.spyOn(childProcess, 'spawnStream').mockImplementation(
+        (_cmd, cmdArgs) => {
+          if (cmdArgs.includes('clone')) {
+            throw new Error('Simulated git clone failure');
+          }
+
+          throw new Error('unknown error');
+        },
+      );
+
+      await expect(
+        setupRepo({
+          repoName: 'kibana',
+          repoOwner: 'elastic',
+          cwd: '/path/to/source/repo',
+          interactive: false,
+        } as ValidConfigOptions),
+      ).rejects.toThrow('Simulated git clone failure');
+
+      expect(fs.rm).toHaveBeenCalledWith(
+        '/myHomeDir/.backport/repositories/elastic/kibana',
+        { recursive: true, force: true },
+      );
+    });
+  });
+
+  describe('while cloning the repo', () => {
+    it('updates the progress', async () => {
+      let onClose: (code: any, signals?: any) => void;
+      let onData: (chunk: any) => void;
+
+      const spinnerTextSpy = vi.spyOn(oraNonInteractiveMode, 'text', 'set');
+      const spinnerSuccessSpy = vi.spyOn(oraNonInteractiveMode, 'succeed');
+
+      vi.spyOn(gitModule, 'getLocalSourceRepoPath').mockResolvedValue(
+        undefined as any,
+      );
+
+      vi.spyOn(childProcess, 'spawnStream').mockImplementation(
+        () =>
+          ({
+            on: (name: string, cb: (...args: any[]) => void) => {
+              if (name === 'close') {
+                onClose = cb;
+              }
+            },
+            stderr: {
+              on: (name: string, handler: (...args: any[]) => void) => {
+                if (name === 'data') {
+                  onData = handler;
+                }
+              },
+            },
+          }) as unknown as ReturnType<typeof childProcess.spawnStream>,
+      );
+
+      setTimeout(() => {
+        onData('Receiving objects:   1%');
+        onData('Receiving objects:   10%');
+        onData('Receiving objects:   20%');
+        onData('Receiving objects:   100%');
+        onData('Updating files:   1%');
+        onData('Updating files:   10%');
+        onData('Updating files:   20%');
+        onData('Updating files:   100%');
+        onClose(0);
+      }, 50);
+
+      await setupRepo({
+        repoName: 'kibana',
+        repoOwner: 'elastic',
+        gitHostname: 'github.com',
+        cwd: '/path/to/source/repo',
+        interactive: false,
+      } as ValidConfigOptions);
+
+      expect(spinnerTextSpy.mock.calls.map((call) => call[0]))
+        .toMatchInlineSnapshot(`
+          [
+            "0% Cloning repository from github.com (one-time operation)",
+            "1% Cloning repository from github.com (one-time operation)",
+            "9% Cloning repository from github.com (one-time operation)",
+            "18% Cloning repository from github.com (one-time operation)",
+            "90% Cloning repository from github.com (one-time operation)",
+            "90% Cloning repository from github.com (one-time operation)",
+            "91% Cloning repository from github.com (one-time operation)",
+            "92% Cloning repository from github.com (one-time operation)",
+            "100% Cloning repository from github.com (one-time operation)",
+          ]
+        `);
+
+      expect(spinnerSuccessSpy).toHaveBeenCalledWith(
+        '100% Cloning repository from github.com (one-time operation)',
+      );
+    });
+  });
+
+  describe('if repo is already cloned', () => {
+    function mockGitProjectRootPath(value: string) {
+      return spawnSpy.mockImplementationOnce(
+        async (cmd: string, cmdArgs: ReadonlyArray<string>) => {
+          if (cmdArgs.includes('rev-parse')) {
+            return { stdout: value, stderr: '', code: 0, cmdArgs };
+          }
+          return { stdout: '', stderr: '', code: 0, cmdArgs };
+        },
+      );
+    }
+
+    beforeEach(async () => {
+      spawnSpy.mockClear();
+      mockGitProjectRootPath(
+        '/myHomeDir/.backport/repositories/elastic/kibana',
+      );
+
+      vi.spyOn(gitModule, 'cloneRepo');
+
+      await setupRepo({
+        githubToken: 'myAccessToken',
+        authenticatedUsername: 'sqren_authenticated',
+        cwd: '/path/to/source/repo',
+        fork: true,
+        repoForkOwner: 'sorenlouv',
+        repoName: 'kibana',
+        repoOwner: 'elastic',
+      } as ValidConfigOptions);
+    });
+
+    it('should not delete the existing repo', () => {
+      expect(fs.rm).not.toHaveBeenCalled();
+    });
+
+    it('should not clone repo', () => {
+      expect(gitModule.cloneRepo).not.toHaveBeenCalled();
+    });
+
+    it('should re-create remotes for both source repo and fork', () => {
+      expect(
+        spawnSpy.mock.calls.map(
+          ([cmd, cmdArgs, cwd]: [
+            string,
+            ReadonlyArray<string>,
+            string,
+            boolean?,
+          ]) => ({
+            cmd: `${cmd} ${cmdArgs.join(' ')}`,
+            cwd,
+          }),
+        ),
+      ).toEqual([
+        {
+          cmd: 'git rev-parse --show-toplevel',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+        {
+          cmd: 'git remote rm origin',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+        {
+          cmd: 'git remote rm sorenlouv',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+        {
+          cmd: 'git remote add sorenlouv https://x-access-token:myAccessToken@github.com/sorenlouv/kibana.git',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+        {
+          cmd: 'git remote rm elastic',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+        {
+          cmd: 'git remote add elastic https://x-access-token:myAccessToken@github.com/elastic/kibana.git',
+          cwd: '/myHomeDir/.backport/repositories/elastic/kibana',
+        },
+      ]);
+    });
+  });
+
+  function mockGitClone() {
+    vi.spyOn(childProcess, 'spawnStream').mockImplementation(
+      (_cmd, cmdArgs) =>
+        ({
+          on: (name: string, cb: (...args: any[]) => void) => {
+            if (cmdArgs.includes('clone') && name === 'close') {
+              cb(0, null);
+            }
+          },
+          stderr: { on: () => null },
+        }) as unknown as ReturnType<typeof childProcess.spawnStream>,
+    );
+  }
+
+  describe('if repo does not exists locally', () => {
+    let spinnerSuccessSpy: MockInstance;
+    beforeEach(async () => {
+      spinnerSuccessSpy = vi.spyOn(oraNonInteractiveMode, 'succeed');
+
+      mockGitClone();
+
+      await setupRepo({
+        githubToken: 'myAccessToken',
+        gitHostname: 'github.com',
+        repoName: 'kibana',
+        repoOwner: 'elastic',
+        cwd: '/path/to/source/repo',
+        interactive: false,
+      } as ValidConfigOptions);
+    });
+
+    it('should clone it from github.com', () => {
+      expect(spinnerSuccessSpy).toHaveBeenCalledWith(
+        '100% Cloning repository from github.com (one-time operation)',
+      );
+
+      expect(childProcess.spawnStream).toHaveBeenCalledWith('git', [
+        'clone',
+        'https://x-access-token:myAccessToken@github.com/elastic/kibana.git',
+        '/myHomeDir/.backport/repositories/elastic/kibana',
+        '--progress',
+      ]);
+    });
+  });
+
+  describe('if repo exists locally', () => {
+    let spinnerSuccessSpy: MockInstance;
+    beforeEach(async () => {
+      spinnerSuccessSpy = vi.spyOn(oraNonInteractiveMode, 'succeed');
+
+      vi.spyOn(gitModule, 'getLocalSourceRepoPath').mockResolvedValue(
+        '/path/to/source/repo',
+      );
+
+      mockGitClone();
+
+      await setupRepo({
+        repoName: 'kibana',
+        repoOwner: 'elastic',
+        cwd: '/path/to/source/repo',
+        interactive: false,
+      } as ValidConfigOptions);
+    });
+
+    it('should clone it from local folder', () => {
+      expect(spinnerSuccessSpy).toHaveBeenCalledWith(
+        '100% Cloning repository from /path/to/source/repo (one-time operation)',
+      );
+
+      expect(childProcess.spawnStream).toHaveBeenCalledWith('git', [
+        'clone',
+        '/path/to/source/repo',
+        '/myHomeDir/.backport/repositories/elastic/kibana',
+        '--progress',
+      ]);
+    });
+  });
+
+  describe('if `repoPath` is a parent of current working directory (cwd)', () => {
+    it('should clone it from local folder', async () => {
+      await expect(() =>
+        setupRepo({
+          repoName: 'kibana',
+          repoOwner: 'elastic',
+          cwd: '/myHomeDir/.backport/repositories/owner/repo/foo',
+          workdir: '/myHomeDir/.backport/repositories/owner/repo',
+          interactive: false,
+        } as ValidConfigOptions),
+      ).rejects.toThrow(
+        'Refusing to clone repo into "/myHomeDir/.backport/repositories/owner/repo" when current working directory is "/myHomeDir/.backport/repositories/owner/repo/foo". Please change backport directory via `--dir` option or run backport from another location',
+      );
+    });
+  });
+});

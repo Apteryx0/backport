@@ -1,0 +1,91 @@
+import { isEmpty, difference } from 'lodash-es';
+import { getGlobalConfigPath } from '../../env.js';
+import { logger } from '../../logger.js';
+import type { OperationResultWithMeta } from './client/graphql-client.js';
+
+export function getInvalidGithubTokenMessage({
+  result,
+  repoOwner,
+  repoName,
+  globalConfigFile,
+  githubToken,
+}: {
+  result: OperationResultWithMeta;
+  repoOwner: string;
+  repoName: string;
+  globalConfigFile?: string;
+  githubToken?: string;
+}): string | undefined {
+  function getSSOAuthUrl(ssoHeader?: string | null) {
+    const matches = ssoHeader?.match(/url=(.*)/);
+    if (matches) {
+      return matches.at(1);
+    }
+  }
+
+  const { statusCode } = result;
+
+  const graphQLErrors = result.error?.graphQLErrors ?? [];
+
+  switch (statusCode) {
+    case 200: {
+      const repoNotFound = graphQLErrors.some(
+        ({ originalError, path }) =>
+          originalError?.type === 'NOT_FOUND' &&
+          path?.join('.') === 'repository',
+      );
+
+      const grantedScopes = result.responseHeaders?.get('x-oauth-scopes') ?? '';
+      const requiredScopes =
+        result.responseHeaders?.get('x-accepted-oauth-scopes') ?? '';
+      const ssoHeader = result.responseHeaders?.get('x-github-sso');
+
+      if (repoNotFound) {
+        const hasRequiredScopes = isEmpty(
+          difference(
+            requiredScopes.split(',').map((s) => s.trim()),
+            grantedScopes.split(',').map((s) => s.trim()),
+          ),
+        );
+
+        // user does not have permission to the repo
+        if (!hasRequiredScopes) {
+          return `You do not have access to the repository "${repoOwner}/${repoName}". Please make sure your GitHub token has the required scopes.\n\nRequired scopes: ${requiredScopes}\nGranted scopes: ${grantedScopes}`;
+        }
+
+        // repo does not exist
+        return `The repository "${repoOwner}/${repoName}" doesn't exist`;
+      }
+
+      const repoAccessForbidden = graphQLErrors.some(
+        ({ extensions }) => extensions.saml_failure === true,
+      );
+
+      const ssoAuthUrl = getSSOAuthUrl(ssoHeader);
+
+      // user does not have permissions
+      if (repoAccessForbidden && ssoAuthUrl) {
+        return `Please follow the link to authorize your GitHub token with SSO:\n\n${ssoAuthUrl}`;
+      }
+      break;
+    }
+
+    case 401: {
+      const globalConfigPath = getGlobalConfigPath(globalConfigFile);
+      const redactedToken = githubToken
+        ? `${githubToken.slice(0, 4)}...${githubToken.slice(-4)}`
+        : 'undefined';
+      return `The GitHub token "${redactedToken}" is invalid. Please make sure your global config (${globalConfigPath}) contains a valid token:\n\n{ "githubToken": "<valid_token>" }`;
+    }
+
+    case undefined: {
+      logger.warn('Missing status code');
+      return undefined;
+    }
+
+    default: {
+      logger.warn(`Unexpected status code: ${statusCode}`);
+      return undefined;
+    }
+  }
+}
